@@ -13,7 +13,7 @@ type ChatMessage = {
   content: string;
 };
 
-// Forzamos runtime Node y desactivamos caché
+// Forzamos runtime Node y desactivamos caché (respuestas dinámicas)
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
@@ -39,7 +39,7 @@ export async function POST(request: NextRequest) {
     const chatHistory: ChatMessage[] = prior
       .filter((m: any) => allowed.has(m.role))
       .map((m: any) => ({
-        role: m.role as ChatMessage["role"], // obligatorio
+        role: m.role as ChatMessage["role"],
         content:
           typeof m.content === "string"
             ? m.content
@@ -56,7 +56,7 @@ export async function POST(request: NextRequest) {
             : String(m.content ?? ""),
       }));
 
-    // 4) Contenido del usuario normalizado (evitando el error de .map)
+    // 4) Contenido del usuario normalizado
     let userContent = "";
     const lmContent = (lastMessage as any).content;
 
@@ -78,29 +78,21 @@ export async function POST(request: NextRequest) {
 
     // 5) Instanciamos el LLM
     const llm = new OpenAI({
-      model: "gpt-3.5-turbo", // usa este o castea si tu tipo no contempla el modelo que quieras
-      // model: "gpt-4o-mini" as any,
+      model: "gpt-3.5-turbo", // Cambia si quieres otro modelo
     });
 
     // 6) Creamos el motor de chat
     const chatEngine = await createChatEngine(llm);
 
-    // 7) Ejecutamos el chat — compatible con versiones que usan objeto o posicional
-    let response: any;
-    try {
-      // Firma nueva (objeto de opciones)
-      response = await (chatEngine as any).chat({
-        message: userContent,
-        chatHistory,
-        stream: true,
-      });
-    } catch {
-      // Firma antigua (message, stream?)
-      response = await (chatEngine as any).chat(userContent, true);
-    }
+    // 7) Ejecutamos el chat
+    // ⚠️ Aquí está el cambio clave: usamos SIEMPRE la firma (message, chatHistory, stream)
+    // Esto evita el error "chatHistory.push is not a function"
+    const response = await (chatEngine as any).chat(userContent, chatHistory, true);
 
-    // 8) Convertimos y enviamos en streaming
+    // 8) Convertimos la respuesta en un ReadableStream para el cliente (SSE/streaming)
     const stream = LlamaIndexStream(response);
+
+    // 9) Enviamos la respuesta en streaming
     return new StreamingTextResponse(stream);
   } catch (error) {
     // Manejo de errores
