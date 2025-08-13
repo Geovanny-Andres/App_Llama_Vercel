@@ -1,5 +1,12 @@
 // app/api/chat/route.ts
-// API route para manejar el chat con LlamaIndex desde Next.js (App Router)
+// ===============================================================
+// Endpoint de chat (App Router, Next.js) con LlamaIndex + OpenAI.
+// - Recibe el historial desde el cliente.
+// - Normaliza roles/contenido.
+// - Inserta un system prompt para ser fiel al PDF.
+// - Llama al motor de chat con firma POSICIONAL (message, history, stream).
+// - Devuelve la respuesta en streaming.
+// ===============================================================
 
 import { Message, StreamingTextResponse } from "ai";
 import { OpenAI } from "llamaindex";
@@ -7,23 +14,23 @@ import { NextRequest, NextResponse } from "next/server";
 import { createChatEngine } from "./engine";
 import { LlamaIndexStream } from "./llamaindex-stream";
 
-// Tipo que espera el motor de LlamaIndex para el historial
+// Tipado local que sí acepta LlamaIndex (evitamos roles no soportados)
 type ChatMessage = {
   role: "system" | "user" | "assistant" | "tool";
   content: string;
 };
 
-// Forzamos runtime Node y desactivamos caché (respuestas dinámicas)
+// Forzamos runtime Node y respuestas dinámicas (sin caché)
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 export async function POST(request: NextRequest) {
   try {
-    // 1) Leemos el body y extraemos mensajes
+    // 1) Body -> messages (historial completo, último = usuario)
     const body = await request.json();
     const { messages }: { messages: Message[] } = body ?? {};
 
-    // 2) Último mensaje (usuario)
+    // 2) Validación mínima
     const lastMessage = messages && messages.length ? messages[messages.length - 1] : undefined;
     if (!messages || !lastMessage || lastMessage.role !== "user") {
       return NextResponse.json(
@@ -32,7 +39,7 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // 3) Historial (sin el último mensaje) filtrando roles soportados
+    // 3) Normalizamos historial (EXCLUYE el último mensaje del usuario)
     const allowed = new Set<ChatMessage["role"]>(["system", "user", "assistant", "tool"]);
     const prior = messages.slice(0, -1);
 
@@ -56,10 +63,9 @@ export async function POST(request: NextRequest) {
             : String(m.content ?? ""),
       }));
 
-    // 4) Contenido del usuario normalizado
+    // 4) Texto del último mensaje (usuario) normalizado (evita error con .map en ternarios)
     let userContent = "";
     const lmContent = (lastMessage as any).content;
-
     if (typeof lmContent === "string") {
       userContent = lmContent;
     } else if (Array.isArray(lmContent)) {
@@ -76,26 +82,34 @@ export async function POST(request: NextRequest) {
       userContent = String(lmContent ?? "");
     }
 
-    // 5) Instanciamos el LLM
+    // 5) Instanciamos OpenAI vía LlamaIndex con gpt-4o-mini
+    //    (cast `as any` para que compile en TS aunque el tipo no lo liste aún)
     const llm = new OpenAI({
-      model: "gpt-3.5-turbo", // Cambia si quieres otro modelo
+      model: "gpt-4o-mini" as any,
     });
 
-    // 6) Creamos el motor de chat
+    // 6) Construimos el motor de chat (tu RAG)
     const chatEngine = await createChatEngine(llm);
 
-    // 7) Ejecutamos el chat
-    // ⚠️ Aquí está el cambio clave: usamos SIEMPRE la firma (message, chatHistory, stream)
-    // Esto evita el error "chatHistory.push is not a function"
+    // 7) System prompt al INICIO del historial: fidelidad al PDF
+    chatHistory.unshift({
+      role: "system",
+      content:
+        "Eres un asistente que responde únicamente con información contenida en los documentos proporcionados. " +
+        "Si no encuentras la respuesta en ellos, responde exactamente: 'No encontré esa información en el documento.' " +
+        "No inventes datos ni uses conocimiento externo.",
+    });
+
+    // 8) Llamada POSICIONAL (✅ la que necesita tu proyecto):
+    //    (message, chatHistory, stream)
     const response = await (chatEngine as any).chat(userContent, chatHistory, true);
 
-    // 8) Convertimos la respuesta en un ReadableStream para el cliente (SSE/streaming)
+    // 9) Adaptamos a stream para el cliente (SSE)
     const stream = LlamaIndexStream(response);
 
-    // 9) Enviamos la respuesta en streaming
+    // 10) Respondemos en streaming
     return new StreamingTextResponse(stream);
   } catch (error) {
-    // Manejo de errores
     console.error("[LlamaIndex]", error);
     return NextResponse.json(
       { error: (error as Error).message ?? "Internal Server Error" },
